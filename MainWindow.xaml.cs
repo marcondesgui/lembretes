@@ -24,11 +24,15 @@ public partial class MainWindow : Window
     private readonly ListCollectionView _view;
     private readonly AppSettings _settings;
     private readonly DispatcherTimer _timer;
-    private readonly Dictionary<Guid, AlertWindow> _alerts = new();
+    private readonly Dictionary<string, AlertWindow> _alerts = new();
     private WinForms.NotifyIcon? _tray;
     private Reminder? _editing;
     private RepeatKind _repeatKind = RepeatKind.None;
     private int _repeatMinutes;
+    private List<int> _remindBefore = new();
+    private TagColor _tag = TagColor.None;
+    private DateTime _calMonth = new(DateTime.Today.Year, DateTime.Today.Month, 1);
+    private DateTime? _calDate;
     private bool _exiting;
     private double _expandedHeight;
     private DateTime _lastRefresh = DateTime.MinValue;
@@ -41,10 +45,17 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _settings = Storage.LoadSettings();
+        Tags.Load(_settings.TagNames);
         _items = new ObservableCollection<Reminder>(Storage.LoadReminders());
         _view = (ListCollectionView)CollectionViewSource.GetDefaultView(_items);
         _view.CustomSort = new ReminderComparer();
+        _view.GroupDescriptions.Add(new PropertyGroupDescription(nameof(Reminder.Group)));
+        _view.Filter = o => _settings.TagFilter is not { } f || ((Reminder)o).Tag == f;
         List.ItemsSource = _view;
+        _groupSignature = string.Join("|", _items.Select(i => i.Group));
+        BuildFilterBar();
+        SetTag(_settings.TagFilter ?? TagColor.None);
+        SetBefore(new List<int>());
 
         ApplySettings();
         SetupTray();
@@ -84,15 +95,32 @@ public partial class MainWindow : Window
         foreach (var r in _items.ToList())
         {
             if (!r.Done && !r.Notified && r.Due.HasValue && r.Due.Value <= now)
+            {
                 Fire(r);
+                continue;
+            }
+            var before = r.TakeDuePreAlert(now);
+            if (before.HasValue) FirePre(r, before.Value);
         }
 
         if ((now - _lastRefresh).TotalSeconds >= 15)
         {
             _lastRefresh = now;
             foreach (var r in _items) r.Refresh();
+            RegroupIfNeeded();
             UpdateSummary();
         }
+    }
+
+    private string _groupSignature = "";
+
+    /// <summary>Reagrupa a lista só quando algum item mudou de seção (ex.: virou "Atrasados", passou da meia-noite).</summary>
+    private void RegroupIfNeeded()
+    {
+        var sig = string.Join("|", _items.Select(i => i.Group));
+        if (sig == _groupSignature) return;
+        _groupSignature = sig;
+        _view.Refresh();
     }
 
     private void Fire(Reminder r)
@@ -102,48 +130,68 @@ public partial class MainWindow : Window
         r.Refresh();
         Save();
         PlaySound();
-        ShowAlert(r);
+        CloseAlert(r, keepHighlight: true); // some o "falta 1 h" se ainda estiver aberto
+        ShowAlert(r, null);
         FlashTaskbar();
+        RegroupIfNeeded();
         UpdateSummary();
     }
 
-    private void ShowAlert(Reminder r)
+    private void FirePre(Reminder r, int minutesBefore)
     {
-        if (_alerts.ContainsKey(r.Id)) return;
-        var w = new AlertWindow(r);
+        Save();
+        PlaySound();
+        ShowAlert(r, minutesBefore);
+    }
+
+    private static string AlertKey(Reminder r, int? before) => $"{r.Id}:{before ?? 0}";
+
+    private void ShowAlert(Reminder r, int? minutesBefore)
+    {
+        var key = AlertKey(r, minutesBefore);
+        if (_alerts.ContainsKey(key)) return;
+        // Só um aviso antecipado por item na tela: o novo substitui o anterior.
+        foreach (var k in _alerts.Keys.Where(k => k.StartsWith(r.Id + ":") && k != AlertKey(r, null)).ToList())
+            _alerts[k].Close();
+        var w = new AlertWindow(r, minutesBefore);
         w.ActionChosen += OnAlertAction;
-        w.Closed += (_, _) => _alerts.Remove(r.Id);
-        _alerts[r.Id] = w;
+        w.Closed += (_, _) => _alerts.Remove(key);
+        _alerts[key] = w;
         w.Show();
     }
 
-    private void CloseAlert(Reminder r)
+    private void CloseAlert(Reminder r, bool keepHighlight = false)
     {
-        if (_alerts.TryGetValue(r.Id, out var w)) w.Close();
-        r.Alerting = false;
+        foreach (var k in _alerts.Keys.Where(k => k.StartsWith(r.Id + ":")).ToList())
+            _alerts[k].Close();
+        if (!keepHighlight) r.Alerting = false;
     }
 
     private void OnAlertAction(AlertWindow w, string action)
     {
         var r = w.Reminder;
+        var now = DateTime.Now;
         switch (action)
         {
             case "open":
                 ShowMain();
                 return;
+            case "ok":
+                w.Close(); // aviso antecipado: só some; o aviso principal continua agendado
+                return;
             case "done":
-                if (r.IsRecurring) r.AdvanceToNext(DateTime.Now);
+                if (r.IsRecurring) r.AdvanceToNext(now);
                 else r.Done = true;
                 break;
             case "close":
+                if (w.MinutesBefore.HasValue) { w.Close(); return; }
                 // Recorrente: fechar o aviso conta como "visto" e já agenda a próxima.
-                if (r.IsRecurring) r.AdvanceToNext(DateTime.Now);
+                if (r.IsRecurring) r.AdvanceToNext(now);
                 break;
             default:
                 if (int.TryParse(action, out var minutes))
                 {
-                    r.Due = DateTime.Now.AddMinutes(minutes);
-                    r.Notified = false;
+                    r.Reschedule(now.AddMinutes(minutes), now);
                     r.Done = false;
                 }
                 break;
@@ -197,6 +245,9 @@ public partial class MainWindow : Window
         NewText.Text = "";
         WhenText.Text = "";
         SetRepeat(RepeatKind.None, 0);
+        SetBefore(new List<int>());
+        // Se a lista está filtrada por um projeto, o próximo item já nasce com essa tag.
+        SetTag(_settings.TagFilter ?? TagColor.None);
     }
 
     private void Submit()
@@ -215,10 +266,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        var now = DateTime.Now;
         if (_editing != null)
         {
             var r = _editing;
             r.Text = text;
+            r.Tag = _tag;
+            bool beforeChanged = !r.RemindBefore.OrderBy(x => x).SequenceEqual(_remindBefore.OrderBy(x => x));
+            r.RemindBefore = _remindBefore.ToList();
             bool scheduleChanged = TruncMinute(r.Due) != TruncMinute(plan.Due)
                                    || r.Repeat != plan.Kind || r.RepeatMinutes != plan.Minutes;
             if (scheduleChanged)
@@ -226,27 +281,335 @@ public partial class MainWindow : Window
                 r.Repeat = plan.Kind;
                 r.RepeatMinutes = plan.Minutes;
                 r.Anchor = plan.Anchor;
-                r.Due = plan.Due;
-                r.Notified = false;
+                r.Reschedule(plan.Due, now);
                 r.Done = false;
                 CloseAlert(r);
+            }
+            else if (beforeChanged)
+            {
+                r.FiredBefore = new List<int>();
+                r.SkipPassedPreAlerts(now);
+                r.Refresh();
             }
             EndEdit();
         }
         else
         {
-            _items.Add(new Reminder
+            var r = new Reminder
             {
                 Text = text,
                 Repeat = plan.Kind,
                 RepeatMinutes = plan.Minutes,
                 Anchor = plan.Anchor,
-                Due = plan.Due
-            });
+                Tag = _tag,
+                RemindBefore = _remindBefore.ToList()
+            };
+            r.Reschedule(plan.Due, now);
+            _items.Add(r);
             ClearInputs();
         }
         Commit();
         NewText.Focus();
+    }
+
+    // ---------- avisar antes (eventos) ----------
+
+    private static readonly (string Label, int Minutes)[] BeforeOptions =
+    {
+        ("5 min antes", 5), ("15 min antes", 15), ("30 min antes", 30), ("1 hora antes", 60), ("2 horas antes", 120),
+        ("1 dia antes", 1440), ("2 dias antes", 2880), ("1 semana antes", 10080)
+    };
+
+    private void OnBeforeClick(object sender, RoutedEventArgs e)
+    {
+        var cm = new ContextMenu();
+        var none = new MenuItem { Header = "Só na hora", IsCheckable = true, IsChecked = _remindBefore.Count == 0 };
+        none.Click += (_, _) => SetBefore(new List<int>());
+        cm.Items.Add(none);
+        cm.Items.Add(new Separator());
+        foreach (var (label, minutes) in BeforeOptions)
+        {
+            var mi = new MenuItem
+            {
+                Header = label,
+                IsCheckable = true,
+                IsChecked = _remindBefore.Contains(minutes),
+                StaysOpenOnClick = true // dá pra marcar vários (ex.: 1 dia e 1 hora antes)
+            };
+            mi.Click += (_, _) =>
+            {
+                var list = _remindBefore.ToList();
+                if (mi.IsChecked) { if (!list.Contains(minutes)) list.Add(minutes); }
+                else list.Remove(minutes);
+                SetBefore(list);
+                none.IsChecked = list.Count == 0;
+            };
+            cm.Items.Add(mi);
+        }
+        cm.PlacementTarget = (UIElement)sender;
+        cm.Placement = PlacementMode.Bottom;
+        cm.IsOpen = true;
+    }
+
+    private void SetBefore(List<int> minutes)
+    {
+        _remindBefore = minutes;
+        bool on = minutes.Count > 0;
+        BeforeBtn.Foreground = (Brush)FindResource(on ? "AccentBrush" : "MutedBrush");
+        BeforeBtn.ToolTip = on ? "Avisar antes: " + Reminder.DescribeBefore(minutes)[6..] : "Avisar antes: só na hora";
+        ShowHint();
+    }
+
+    // ---------- tag do projeto ----------
+
+    private void OnTagClick(object sender, RoutedEventArgs e)
+    {
+        var cm = BuildTagMenu(_tag, SetTag);
+        cm.PlacementTarget = (UIElement)sender;
+        cm.Placement = PlacementMode.Bottom;
+        cm.IsOpen = true;
+    }
+
+    private ContextMenu BuildTagMenu(TagColor current, Action<TagColor> choose)
+    {
+        var cm = new ContextMenu();
+        foreach (var item in TagMenuItems(current, choose)) cm.Items.Add(item);
+        return cm;
+    }
+
+    private IEnumerable<object> TagMenuItems(TagColor current, Action<TagColor> choose)
+    {
+        foreach (var t in Tags.All)
+        {
+            var mi = new MenuItem
+            {
+                Header = Tags.NameOf(t),
+                IsCheckable = true,
+                IsChecked = current == t,
+                Icon = new System.Windows.Shapes.Ellipse { Width = 10, Height = 10, Fill = Tags.BrushOf(t) }
+            };
+            mi.Click += (_, _) => choose(t);
+            yield return mi;
+        }
+        yield return new Separator();
+        var none = new MenuItem { Header = "Sem tag", IsCheckable = true, IsChecked = current == TagColor.None };
+        none.Click += (_, _) => choose(TagColor.None);
+        yield return none;
+        yield return new Separator();
+        var rename = new MenuItem { Header = "Renomear tags…" };
+        rename.Click += (_, _) => ShowTagNamesDialog();
+        yield return rename;
+    }
+
+    private void SetTag(TagColor t)
+    {
+        _tag = t;
+        TagBtn.Foreground = t == TagColor.None ? (Brush)FindResource("MutedBrush") : Tags.BrushOf(t);
+        TagBtn.ToolTip = t == TagColor.None ? "Tag do projeto: nenhuma" : "Tag do projeto: " + Tags.NameOf(t);
+    }
+
+    private void OnCardContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.ContextMenu == null || fe.DataContext is not Reminder r) return;
+        var tagMenu = fe.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(m => (m.Tag as string) == "tagmenu");
+        if (tagMenu == null) return;
+        tagMenu.Items.Clear();
+        foreach (var item in TagMenuItems(r.Tag, t => { r.Tag = t; Commit(); })) tagMenu.Items.Add(item);
+    }
+
+    // ---------- filtro por tag ----------
+
+    private void BuildFilterBar()
+    {
+        FilterBar.Children.Clear();
+        void Add(TagColor? t)
+        {
+            bool active = _settings.TagFilter == t;
+            var dot = new Border
+            {
+                Width = t == null ? 26 : 14,
+                Height = 14,
+                CornerRadius = new CornerRadius(7),
+                Margin = new Thickness(0, 0, 5, 0),
+                Cursor = Cursors.Hand,
+                Background = t == null ? (Brush)FindResource("Surface2Brush") : Tags.BrushOf(t.Value),
+                BorderThickness = new Thickness(active ? 2 : 0),
+                BorderBrush = (Brush)FindResource("TextBrush"),
+                Opacity = _settings.TagFilter == null || active ? 1 : 0.45,
+                ToolTip = t == null ? "Mostrar todas" : "Mostrar só: " + Tags.NameOf(t.Value),
+                Child = t == null
+                    ? new TextBlock
+                    {
+                        Text = "todas", FontSize = 9, Foreground = (Brush)FindResource("MutedBrush"),
+                        HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+                    }
+                    : null
+            };
+            if (t == null) dot.Width = 34;
+            dot.MouseLeftButtonUp += (_, _) => SetFilter(_settings.TagFilter == t ? null : t);
+            FilterBar.Children.Add(dot);
+        }
+        Add(null);
+        foreach (var t in Tags.All) Add(t);
+    }
+
+    private void SetFilter(TagColor? t)
+    {
+        _settings.TagFilter = t;
+        BuildFilterBar();
+        _view.Refresh();
+        if (_editing == null) SetTag(t ?? TagColor.None);
+        UpdateSummary();
+        SaveSettings();
+    }
+
+    private void ShowTagNamesDialog()
+    {
+        var dlg = new Window
+        {
+            Title = "Nomes das tags",
+            Owner = this,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SizeToContent = SizeToContent.WidthAndHeight,
+            ResizeMode = ResizeMode.NoResize,
+            WindowStyle = WindowStyle.ToolWindow,
+            Topmost = true,
+            Background = (Brush)FindResource("BgBrush"),
+            FontFamily = new FontFamily("Segoe UI")
+        };
+        var panel = new StackPanel { Margin = new Thickness(14), Width = 240 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Dê um nome para cada projeto:", Foreground = (Brush)FindResource("MutedBrush"),
+            FontSize = 11, Margin = new Thickness(0, 0, 0, 8)
+        });
+        var boxes = new Dictionary<TagColor, TextBox>();
+        foreach (var t in Tags.All)
+        {
+            var row = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var dot = new System.Windows.Shapes.Ellipse
+            {
+                Width = 12, Height = 12, Fill = Tags.BrushOf(t), Margin = new Thickness(0, 0, 8, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            DockPanel.SetDock(dot, Dock.Left);
+            row.Children.Add(dot);
+            var box = new TextBox { Style = (Style)FindResource("InputBox"), Text = Tags.NameOf(t), Tag = Tags.DefaultName(t) };
+            row.Children.Add(box);
+            boxes[t] = box;
+            panel.Children.Add(row);
+        }
+        var ok = new Button
+        {
+            Content = "Salvar", Style = (Style)FindResource("AccentTextBtn"), IsDefault = true,
+            HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 6, 0, 0)
+        };
+        ok.Click += (_, _) => dlg.DialogResult = true;
+        panel.Children.Add(ok);
+        dlg.Content = panel;
+        dlg.Loaded += (_, _) => { boxes[TagColor.Orange].Focus(); boxes[TagColor.Orange].SelectAll(); };
+        dlg.KeyDown += (_, ke) => { if (ke.Key == Key.Enter) dlg.DialogResult = true; };
+
+        if (dlg.ShowDialog() != true) return;
+        foreach (var (t, box) in boxes)
+        {
+            var name = box.Text.Trim();
+            if (name.Length == 0 || name == Tags.DefaultName(t)) _settings.TagNames.Remove(t.ToString());
+            else _settings.TagNames[t.ToString()] = name.Length > 24 ? name[..24] : name;
+        }
+        Tags.Load(_settings.TagNames);
+        foreach (var r in _items) r.RefreshTag();
+        SetTag(_tag);
+        BuildFilterBar();
+        SaveSettings();
+    }
+
+    // ---------- calendário ----------
+
+    private void OnCalendarClick(object sender, RoutedEventArgs e)
+    {
+        // Começa pela data já digitada (se houver), senão hoje.
+        DateTime? current = null;
+        if (Recurrence.TryBuild(WhenText.Text, RepeatKind.None, 0, DateTime.Now, out var plan)) current = plan.Due;
+        _calDate = current?.Date;
+        var month = (current ?? DateTime.Today);
+        _calMonth = new DateTime(month.Year, month.Month, 1);
+        CalTime.Text = current.HasValue ? current.Value.ToString("HH:mm") : "09:00";
+        BuildCalendar();
+        CalendarPopup.IsOpen = true;
+    }
+
+    private void OnCalPrev(object sender, RoutedEventArgs e) { _calMonth = _calMonth.AddMonths(-1); BuildCalendar(); }
+    private void OnCalNext(object sender, RoutedEventArgs e) { _calMonth = _calMonth.AddMonths(1); BuildCalendar(); }
+
+    private void BuildCalendar()
+    {
+        var pt = new System.Globalization.CultureInfo("pt-BR");
+        var label = _calMonth.ToString("MMMM yyyy", pt);
+        CalMonth.Text = char.ToUpper(label[0]) + label[1..];
+        CalDays.Children.Clear();
+        var today = DateTime.Today;
+        var first = _calMonth.AddDays(-(int)_calMonth.DayOfWeek);
+        for (int i = 0; i < 42; i++)
+        {
+            var d = first.AddDays(i);
+            bool inMonth = d.Month == _calMonth.Month;
+            bool selected = _calDate == d;
+            var b = new Button
+            {
+                Style = (Style)FindResource("DayBtn"),
+                Content = d.Day.ToString(),
+                Tag = d,
+                IsEnabled = d >= today,
+                Foreground = selected ? (Brush)FindResource("BgBrush")
+                    : (Brush)FindResource(inMonth ? "TextBrush" : "MutedBrush"),
+                Background = selected ? (Brush)FindResource("AccentBrush") : Brushes.Transparent,
+                BorderBrush = d == today && !selected ? (Brush)FindResource("LineBrush") : Brushes.Transparent,
+                FontWeight = d == today ? FontWeights.Bold : FontWeights.Normal
+            };
+            b.Click += (_, _) => { _calDate = d; BuildCalendar(); ApplyCalendar(); };
+            CalDays.Children.Add(b);
+        }
+    }
+
+    private bool TryCalTime(out TimeSpan tod)
+    {
+        tod = TimeSpan.FromHours(9);
+        var t = CalTime.Text.Trim();
+        if (t.Length == 0) return true;
+        if (!WhenParser.TryParse(t.Contains(':') || t.Contains('h') ? t : t + "h", DateTime.Now, out var d) || d == null) return false;
+        tod = new TimeSpan(d.Value.Hour, d.Value.Minute, 0);
+        return true;
+    }
+
+    private void ApplyCalendar()
+    {
+        if (_calDate == null || !TryCalTime(out var tod)) return;
+        WhenText.Text = (_calDate.Value + tod).ToString("dd/MM/yyyy HH:mm");
+    }
+
+    private void OnCalTimeChanged(object sender, TextChangedEventArgs e) => ApplyCalendar();
+
+    private void OnCalTimeChip(object sender, RoutedEventArgs e)
+    {
+        CalTime.Text = (string)((FrameworkElement)sender).Tag;
+        _calDate ??= DateTime.Today;
+        BuildCalendar();
+        ApplyCalendar();
+    }
+
+    private void OnCalTimeKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) { OnCalOk(sender, e); e.Handled = true; }
+        else if (e.Key == Key.Escape) { CalendarPopup.IsOpen = false; e.Handled = true; }
+    }
+
+    private void OnCalOk(object sender, RoutedEventArgs e)
+    {
+        _calDate ??= DateTime.Today;
+        ApplyCalendar();
+        CalendarPopup.IsOpen = false;
+        if (NewText.Text.Trim().Length == 0) NewText.Focus(); else WhenText.Focus();
     }
 
     // ---------- repetição (botão ↻) ----------
@@ -309,6 +672,8 @@ public partial class MainWindow : Window
         NewText.Text = r.Text;
         WhenText.Text = r.Due.HasValue && !r.Done ? r.Due.Value.ToString("dd/MM/yyyy HH:mm") : "";
         SetRepeat(r.Repeat, r.RepeatMinutes);
+        SetBefore(r.RemindBefore.ToList());
+        SetTag(r.Tag);
         AddBtn.Content = "";
         AddBtn.ToolTip = "Salvar (Enter) · Esc cancela";
         NewText.Focus();
@@ -336,7 +701,7 @@ public partial class MainWindow : Window
     private void ShowHint()
     {
         var when = WhenText.Text;
-        if (string.IsNullOrWhiteSpace(when) && _repeatKind == RepeatKind.None)
+        if (string.IsNullOrWhiteSpace(when) && _repeatKind == RepeatKind.None && _remindBefore.Count == 0)
         {
             Hint.Visibility = Visibility.Collapsed;
             return;
@@ -345,12 +710,18 @@ public partial class MainWindow : Window
         if (Recurrence.TryBuild(when, _repeatKind, _repeatMinutes, DateTime.Now, out var plan) && plan.Due.HasValue)
         {
             Hint.Text = "→ " + Reminder.Describe(plan.Due.Value)
-                        + (plan.Kind != RepeatKind.None ? "  ·  ↻ " + Recurrence.Describe(plan.Kind, plan.Minutes, plan.Anchor) : "");
+                        + (plan.Kind != RepeatKind.None ? "  ·  ↻ " + Recurrence.Describe(plan.Kind, plan.Minutes, plan.Anchor) : "")
+                        + (_remindBefore.Count > 0 ? "  ·  " + Reminder.DescribeBefore(_remindBefore) : "");
             Hint.Foreground = (Brush)FindResource("InfoBrush");
+        }
+        else if (string.IsNullOrWhiteSpace(when) && _remindBefore.Count > 0 && _repeatKind == RepeatKind.None)
+        {
+            Hint.Text = "Defina uma data/hora para poder avisar antes.";
+            Hint.Foreground = (Brush)FindResource("MutedBrush");
         }
         else
         {
-            Hint.Text = "Não entendi o horário. Ex.: 14:30 · 9h · +15m · amanhã 9h · 25/12 10:00 · todo dia 9h · toda segunda 10h · a cada 2h";
+            Hint.Text = "Não entendi. Ex.: 14:30 · +15m · amanhã 9h · sexta 14h · dia 25 às 15h · 25 de dezembro 19h · 25/12/2027 10h · todo dia 9h";
             Hint.Foreground = (Brush)FindResource("DangerBrush");
         }
     }
@@ -422,8 +793,7 @@ public partial class MainWindow : Window
         var r = ItemOf(sender);
         if (r == null) return;
         var tag = (string)((FrameworkElement)sender).Tag;
-        r.Due = tag == "tomorrow" ? DateTime.Today.AddDays(1).AddHours(9) : DateTime.Now.AddMinutes(int.Parse(tag));
-        r.Notified = false;
+        r.Reschedule(tag == "tomorrow" ? DateTime.Today.AddDays(1).AddHours(9) : DateTime.Now.AddMinutes(int.Parse(tag)), DateTime.Now);
         r.Done = false;
         CloseAlert(r);
         Commit();
@@ -434,8 +804,7 @@ public partial class MainWindow : Window
         var r = ItemOf(sender);
         if (r == null) return;
         r.StopRepeating();
-        r.Due = null;
-        r.Notified = false;
+        r.Reschedule(null, DateTime.Now);
         CloseAlert(r);
         Commit();
     }
@@ -476,7 +845,10 @@ public partial class MainWindow : Window
             ? (done > 0 ? "Tudo feito!" : "")
             : $"{pending.Count} pendente{s}" + (overdue > 0 ? $" · {overdue} atrasado{(overdue == 1 ? "" : "s")}" : "");
         ClearDoneBtn.Visibility = done > 0 ? Visibility.Visible : Visibility.Collapsed;
-        EmptyText.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        EmptyText.Visibility = _view.IsEmpty ? Visibility.Visible : Visibility.Collapsed;
+        EmptyText.Text = _items.Count > 0 && _settings.TagFilter is { } f
+            ? $"Nada com a tag \"{Tags.NameOf(f)}\".\nClique em \"todas\" para ver tudo."
+            : "Nenhum lembrete por aqui.\nEscreva acima e tecle Enter.";
 
         var next = pending.OrderBy(i => i.Due ?? DateTime.MaxValue).ThenBy(i => i.Created).FirstOrDefault();
         Subtitle.Text = next == null

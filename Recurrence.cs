@@ -155,7 +155,7 @@ public static class Recurrence
         out DateTime? anchor, out bool valid)
     {
         kind = RepeatKind.None; minutes = 0; anchor = null; valid = false;
-        var s = Regex.Replace(RemoveAccents((input ?? "").Trim().ToLowerInvariant()), @"\s+", " ");
+        var s = WhenParser.Normalize(input);
         if (s.Length == 0) return false;
 
         Match m;
@@ -243,13 +243,5 @@ public static class Recurrence
         tod = d.Value.TimeOfDay;
         tod = new TimeSpan(tod.Hours, tod.Minutes, 0);
         return true;
-    }
-
-    private static string RemoveAccents(string s)
-    {
-        var sb = new StringBuilder(s.Length);
-        foreach (var c in s.Normalize(NormalizationForm.FormD))
-            if (CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark) sb.Append(c);
-        return sb.ToString().Normalize(NormalizationForm.FormC);
     }
 }

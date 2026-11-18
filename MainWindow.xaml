@@ -12,10 +12,13 @@
         <DataTemplate x:Key="ReminderTemplate">
             <Border x:Name="Card" Margin="0,0,0,5" Padding="8,7,4,7" CornerRadius="7"
                     Background="{StaticResource SurfaceBrush}" BorderThickness="1" BorderBrush="Transparent"
-                    MouseLeftButtonDown="OnCardMouseDown">
+                    MouseLeftButtonDown="OnCardMouseDown" ContextMenuOpening="OnCardContextMenuOpening">
                 <Border.ContextMenu>
                     <ContextMenu>
                         <MenuItem Header="Editar" Click="OnEditItem"/>
+                        <MenuItem Header="Tag do projeto" Tag="tagmenu">
+                            <MenuItem Header="…"/>
+                        </MenuItem>
                         <Separator/>
                         <MenuItem Header="Adiar 10 min" Tag="10" Click="OnSnoozeItem"/>
                         <MenuItem Header="Adiar 1 hora" Tag="60" Click="OnSnoozeItem"/>
@@ -32,25 +35,42 @@
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <CheckBox Style="{StaticResource RoundCheck}" IsChecked="{Binding Done}" Click="OnToggleDone"
+                    <!-- faixa da cor do projeto -->
+                    <Border Width="3" CornerRadius="1.5" Margin="-5,-3,5,-3" Background="{Binding TagBrush}"
+                            Visibility="{Binding HasTag, Converter={StaticResource BoolVis}}"/>
+                    <CheckBox Grid.Column="1" Style="{StaticResource RoundCheck}" IsChecked="{Binding Done}" Click="OnToggleDone"
                               VerticalAlignment="Top" Margin="0,1,0,0" ToolTip="Marcar como feito"/>
-                    <StackPanel Grid.Column="1" Margin="9,0,4,0">
+                    <StackPanel Grid.Column="2" Margin="9,0,4,0">
                         <TextBlock x:Name="Txt" Text="{Binding Text}" TextWrapping="Wrap" FontSize="13"
                                    Foreground="{StaticResource TextBrush}"/>
-                        <WrapPanel Margin="0,2,0,0" Visibility="{Binding HasDue, Converter={StaticResource BoolVis}}">
-                            <TextBlock Text="{Binding DueText}" Foreground="{Binding DueBrush}" FontSize="11" Margin="0,0,8,0"/>
+                        <WrapPanel Margin="0,2,0,0">
+                            <StackPanel Orientation="Horizontal" Margin="0,0,8,0"
+                                        Visibility="{Binding HasTag, Converter={StaticResource BoolVis}}">
+                                <Ellipse Width="7" Height="7" Fill="{Binding TagBrush}" VerticalAlignment="Center" Margin="0,1,4,0"/>
+                                <TextBlock Text="{Binding TagName}" Foreground="{Binding TagBrush}" FontSize="11"/>
+                            </StackPanel>
+                            <TextBlock Text="{Binding DueText}" Foreground="{Binding DueBrush}" FontSize="11" Margin="0,0,8,0"
+                                       Visibility="{Binding HasDue, Converter={StaticResource BoolVis}}"/>
                             <StackPanel Orientation="Horizontal" Visibility="{Binding IsRecurring, Converter={StaticResource BoolVis}}"
                                         ToolTip="Lembrete recorrente">
                                 <TextBlock Text="&#xE8EE;" FontFamily="{StaticResource IconFont}" FontSize="10"
                                            Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="0,1,4,0"/>
-                                <TextBlock Text="{Binding RepeatText}" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
+                                <TextBlock Text="{Binding RepeatText}" Foreground="{StaticResource MutedBrush}" FontSize="11"
+                                           Margin="0,0,8,0"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Visibility="{Binding HasRemindBefore, Converter={StaticResource BoolVis}}"
+                                        ToolTip="Avisos antecipados">
+                                <TextBlock Text="&#xE823;" FontFamily="{StaticResource IconFont}" FontSize="10"
+                                           Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="0,1,4,0"/>
+                                <TextBlock Text="{Binding RemindBeforeText}" Foreground="{StaticResource MutedBrush}" FontSize="11"/>
                             </StackPanel>
                         </WrapPanel>
                     </StackPanel>
-                    <Button x:Name="Del" Grid.Column="2" Style="{StaticResource IconBtn}" Width="22" Height="22"
+                    <Button x:Name="Del" Grid.Column="3" Style="{StaticResource IconBtn}" Width="22" Height="22"
                             FontSize="10" Content="&#xE74D;" Click="OnDeleteItem" Visibility="Hidden"
                             VerticalAlignment="Top" ToolTip="Excluir"/>
                 </Grid>
@@ -129,24 +149,87 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="88"/>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBox x:Name="NewText" Style="{StaticResource InputBox}" Tag="Novo lembrete…"
-                             KeyDown="OnInputKeyDown"/>
-                    <TextBox x:Name="WhenText" Grid.Column="1" Margin="6,0,0,0" Style="{StaticResource InputBox}"
-                             Tag="quando?" KeyDown="OnInputKeyDown" TextChanged="OnWhenChanged"
-                             ToolTip="Exemplos: 14:30 · 9h · +15m · amanhã 9h · 25/12 10:00 · todo dia 9h · dias úteis 18h · toda segunda 10h · a cada 2h (vazio = sem horário)"/>
-                    <Button x:Name="RepeatBtn" Grid.Column="2" Margin="4,0,0,0" Style="{StaticResource IconBtn}"
-                            Height="32" Width="28" FontSize="13" Content="&#xE8EE;" Click="OnRepeatClick"
-                            ToolTip="Repetir: não"/>
-                    <Button x:Name="AddBtn" Grid.Column="3" Margin="4,0,0,0" Style="{StaticResource AccentBtn}"
-                            Click="OnAddClick" Content="&#xE710;" ToolTip="Adicionar (Enter)"/>
-                </Grid>
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="NewText" Style="{StaticResource InputBox}" Tag="Novo lembrete ou evento…"
+                                 KeyDown="OnInputKeyDown"/>
+                        <Button x:Name="AddBtn" Grid.Column="1" Margin="6,0,0,0" Style="{StaticResource AccentBtn}"
+                                Click="OnAddClick" Content="&#xE710;" ToolTip="Adicionar (Enter)"/>
+                    </Grid>
+                    <Grid Margin="0,6,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="WhenText" Style="{StaticResource InputBox}"
+                                 Tag="quando? ex.: sexta 14h · dia 25 · 25/12 19h"
+                                 KeyDown="OnInputKeyDown" TextChanged="OnWhenChanged"
+                                 ToolTip="Exemplos: 14:30 · +15m · amanhã 9h · sexta 14h · próxima segunda · dia 25 às 15h · 25 de dezembro 19h · 25/12/2027 10h · todo dia 9h · a cada 2h (vazio = sem horário)"/>
+                        <Button x:Name="CalendarBtn" Grid.Column="1" Margin="4,0,0,0" Style="{StaticResource IconBtn}"
+                                Height="32" Width="30" FontSize="13" Content="&#xE787;" Click="OnCalendarClick"
+                                ToolTip="Escolher data e hora no calendário"/>
+                        <Button x:Name="RepeatBtn" Grid.Column="2" Style="{StaticResource IconBtn}"
+                                Height="32" Width="30" FontSize="13" Content="&#xE8EE;" Click="OnRepeatClick"
+                                ToolTip="Repetir: não"/>
+                        <Button x:Name="BeforeBtn" Grid.Column="3" Style="{StaticResource IconBtn}"
+                                Height="32" Width="30" FontSize="13" Content="&#xE823;" Click="OnBeforeClick"
+                                ToolTip="Avisar antes: não"/>
+                        <Button x:Name="TagBtn" Grid.Column="4" Style="{StaticResource IconBtn}"
+                                Height="32" Width="30" FontSize="13" Content="&#xE8EC;" Click="OnTagClick"
+                                ToolTip="Tag do projeto: nenhuma"/>
+                    </Grid>
+
+                    <!-- Calendário -->
+                    <Popup x:Name="CalendarPopup" PlacementTarget="{Binding ElementName=WhenText}" Placement="Bottom"
+                           VerticalOffset="4" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+                        <Border Background="{StaticResource BgBrush}" BorderBrush="{StaticResource LineBrush}"
+                                BorderThickness="1" CornerRadius="8" Padding="10" Width="252">
+                            <StackPanel>
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Left" Style="{StaticResource IconBtn}" Content="&#xE76B;"
+                                            Click="OnCalPrev" ToolTip="Mês anterior"/>
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE76C;"
+                                            Click="OnCalNext" ToolTip="Próximo mês"/>
+                                    <TextBlock x:Name="CalMonth" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               FontWeight="SemiBold" FontSize="12" Foreground="{StaticResource TextBrush}"/>
+                                </DockPanel>
+                                <UniformGrid Columns="7" Margin="0,6,0,2">
+                                    <TextBlock Text="D" Style="{StaticResource CalHead}"/>
+                                    <TextBlock Text="S" Style="{StaticResource CalHead}"/>
+                                    <TextBlock Text="T" Style="{StaticResource CalHead}"/>
+                                    <TextBlock Text="Q" Style="{StaticResource CalHead}"/>
+                                    <TextBlock Text="Q" Style="{StaticResource CalHead}"/>
+                                    <TextBlock Text="S" Style="{StaticResource CalHead}"/>
+                                    <TextBlock Text="S" Style="{StaticResource CalHead}"/>
+                                </UniformGrid>
+                                <UniformGrid x:Name="CalDays" Columns="7" Rows="6"/>
+                                <DockPanel Margin="0,8,0,0">
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource AccentTextBtn}" Content="OK"
+                                            Padding="14,4" Click="OnCalOk"/>
+                                    <TextBlock Text="Hora" Foreground="{StaticResource MutedBrush}" FontSize="11"
+                                               VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                    <TextBox x:Name="CalTime" Style="{StaticResource InputBox}" Width="64" Tag="09:00"
+                                             HorizontalAlignment="Left" TextChanged="OnCalTimeChanged" KeyDown="OnCalTimeKeyDown"/>
+                                </DockPanel>
+                                <WrapPanel Margin="0,6,0,0">
+                                    <Button Style="{StaticResource Chip}" Content="08:00" Tag="08:00" Click="OnCalTimeChip"/>
+                                    <Button Style="{StaticResource Chip}" Content="09:00" Tag="09:00" Click="OnCalTimeChip"/>
+                                    <Button Style="{StaticResource Chip}" Content="12:00" Tag="12:00" Click="OnCalTimeChip"/>
+                                    <Button Style="{StaticResource Chip}" Content="14:00" Tag="14:00" Click="OnCalTimeChip"/>
+                                    <Button Style="{StaticResource Chip}" Content="18:00" Tag="18:00" Click="OnCalTimeChip"/>
+                                    <Button Style="{StaticResource Chip}" Content="20:00" Tag="20:00" Click="OnCalTimeChip"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+                </StackPanel>
 
                 <WrapPanel Grid.Row="1" Margin="0,6,0,0">
                     <Button Style="{StaticResource Chip}" Content="+5 min" Tag="+5m" Click="OnChipClick"/>
@@ -154,24 +237,51 @@
                     <Button Style="{StaticResource Chip}" Content="+30 min" Tag="+30m" Click="OnChipClick"/>
                     <Button Style="{StaticResource Chip}" Content="+1 h" Tag="+1h" Click="OnChipClick"/>
                     <Button Style="{StaticResource Chip}" Content="amanhã 9h" Tag="amanhã 9h" Click="OnChipClick"/>
+                    <Button Style="{StaticResource Chip}" Content="próx. segunda" Tag="próxima segunda 9h" Click="OnChipClick"/>
                 </WrapPanel>
 
                 <TextBlock x:Name="Hint" Grid.Row="2" FontSize="11" Margin="2,0,0,2" TextWrapping="Wrap" Visibility="Collapsed"/>
 
                 <Grid Grid.Row="3" Margin="0,6,0,0">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <ItemsControl x:Name="List" ItemTemplate="{StaticResource ReminderTemplate}" Margin="0,0,4,0"/>
+                        <ItemsControl x:Name="List" ItemTemplate="{StaticResource ReminderTemplate}" Margin="0,0,4,0">
+                            <ItemsControl.GroupStyle>
+                                <GroupStyle>
+                                    <GroupStyle.HeaderTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" Margin="2,6,0,5">
+                                                <TextBlock x:Name="GName" Text="{Binding Name}" FontSize="11" FontWeight="SemiBold"
+                                                           Foreground="{StaticResource MutedBrush}"/>
+                                                <TextBlock Text="{Binding ItemCount, StringFormat=' · {0}'}" FontSize="11"
+                                                           Foreground="{StaticResource MutedBrush}"/>
+                                            </StackPanel>
+                                            <DataTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding Name}" Value="Atrasados">
+                                                    <Setter TargetName="GName" Property="Foreground" Value="{StaticResource DangerBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding Name}" Value="Hoje">
+                                                    <Setter TargetName="GName" Property="Foreground" Value="{StaticResource AccentBrush}"/>
+                                                </DataTrigger>
+                                            </DataTemplate.Triggers>
+                                        </DataTemplate>
+                                    </GroupStyle.HeaderTemplate>
+                                </GroupStyle>
+                            </ItemsControl.GroupStyle>
+                        </ItemsControl>
                     </ScrollViewer>
                     <TextBlock x:Name="EmptyText" TextAlignment="Center" Foreground="{StaticResource MutedBrush}"
                                HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" LineHeight="18"
                                Text="Nenhum lembrete por aqui.&#10;Escreva acima e tecle Enter."/>
                 </Grid>
 
-                <DockPanel Grid.Row="4" Margin="2,6,12,0">
-                    <Button x:Name="ClearDoneBtn" DockPanel.Dock="Right" Style="{StaticResource LinkBtn}"
-                            Content="Limpar concluídos" Click="OnClearDone"/>
-                    <TextBlock x:Name="FooterText" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
-                </DockPanel>
+                <StackPanel Grid.Row="4" Margin="2,6,12,0">
+                    <StackPanel x:Name="FilterBar" Orientation="Horizontal" Margin="0,0,0,5"/>
+                    <DockPanel>
+                        <Button x:Name="ClearDoneBtn" DockPanel.Dock="Right" Style="{StaticResource LinkBtn}"
+                                Content="Limpar concluídos" Click="OnClearDone"/>
+                        <TextBlock x:Name="FooterText" FontSize="11" Foreground="{StaticResource MutedBrush}"/>
+                    </DockPanel>
+                </StackPanel>
             </Grid>
         </Grid>
     </Border>

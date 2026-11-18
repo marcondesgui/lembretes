@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
@@ -32,6 +34,19 @@ public class Reminder : INotifyPropertyChanged
     /// <summary>Referência do padrão de repetição (horário, dia da semana / do mês).</summary>
     public DateTime? Anchor { get; set; }
 
+    private TagColor _tag;
+    public TagColor Tag { get => _tag; set { _tag = value; OnChanged(); RefreshTag(); } }
+    [JsonIgnore] public bool HasTag => Tag != TagColor.None;
+    [JsonIgnore] public string TagName => Tags.NameOf(Tag);
+    [JsonIgnore] public Brush TagBrush => Tags.BrushOf(Tag);
+
+    public void RefreshTag()
+    {
+        OnChanged(nameof(HasTag));
+        OnChanged(nameof(TagName));
+        OnChanged(nameof(TagBrush));
+    }
+
     [JsonIgnore] public bool IsRecurring => Repeat != RepeatKind.None;
     [JsonIgnore] public string RepeatText => IsRecurring ? Recurrence.Describe(Repeat, RepeatMinutes, Anchor) : "";
 
@@ -40,9 +55,81 @@ public class Reminder : INotifyPropertyChanged
     {
         if (!IsRecurring) return;
         var after = Due.HasValue && Due.Value > now ? Due.Value : now;
-        Due = Recurrence.Next(Repeat, RepeatMinutes, Anchor ?? Due ?? now, after);
-        Notified = false;
+        Reschedule(Recurrence.Next(Repeat, RepeatMinutes, Anchor ?? Due ?? now, after), now);
         Done = false;
+    }
+
+    // ---------- avisos antecipados (eventos) ----------
+
+    /// <summary>Minutos antes do horário em que também avisa (ex.: 1440 = 1 dia antes, 60 = 1 h antes).</summary>
+    public List<int> RemindBefore { get; set; } = new();
+    /// <summary>Quais avisos antecipados já foram mostrados para o horário atual.</summary>
+    public List<int> FiredBefore { get; set; } = new();
+
+    [JsonIgnore] public bool HasRemindBefore => RemindBefore.Count > 0 && Due.HasValue && !Done;
+    [JsonIgnore] public string RemindBeforeText => DescribeBefore(RemindBefore);
+
+    public static string DescribeBefore(IEnumerable<int> minutes)
+    {
+        var list = minutes.Distinct().OrderByDescending(m => m).Select(DescribeSpan).ToList();
+        if (list.Count == 0) return "";
+        var joined = list.Count == 1 ? list[0] : string.Join(", ", list.Take(list.Count - 1)) + " e " + list[^1];
+        return "avisa " + joined + " antes";
+    }
+
+    public static string DescribeSpan(int minutes) =>
+        minutes % 10080 == 0 ? (minutes == 10080 ? "1 semana" : $"{minutes / 10080} semanas")
+        : Recurrence.DescribeMinutes(minutes);
+
+    /// <summary>Muda o horário: zera o aviso principal e os antecipados (os que já passaram não disparam).</summary>
+    public void Reschedule(DateTime? due, DateTime now)
+    {
+        Due = due;
+        Notified = false;
+        FiredBefore = new List<int>();
+        SkipPassedPreAlerts(now);
+        Refresh();
+    }
+
+    /// <summary>Marca como já mostrados os avisos antecipados cujo momento já passou.</summary>
+    public void SkipPassedPreAlerts(DateTime now)
+    {
+        if (!Due.HasValue) return;
+        foreach (var m in RemindBefore)
+            if (!FiredBefore.Contains(m) && now >= Due.Value.AddMinutes(-m))
+                FiredBefore.Add(m);
+    }
+
+    /// <summary>Aviso antecipado que deve disparar agora (o mais próximo do horário), ou null.</summary>
+    public int? TakeDuePreAlert(DateTime now)
+    {
+        if (Done || !Due.HasValue || now >= Due.Value || RemindBefore.Count == 0) return null;
+        int? fire = null;
+        foreach (var m in RemindBefore.Distinct())
+        {
+            if (FiredBefore.Contains(m) || now < Due.Value.AddMinutes(-m)) continue;
+            FiredBefore.Add(m);
+            if (fire == null || m < fire) fire = m; // se vários passaram (app fechado), mostra só o mais próximo
+        }
+        return fire;
+    }
+
+    /// <summary>Seção da lista.</summary>
+    [JsonIgnore]
+    public string Group
+    {
+        get
+        {
+            if (Done) return "Concluídos";
+            if (!Due.HasValue) return "Sem data";
+            var d = Due.Value;
+            var today = DateTime.Today;
+            if (d <= DateTime.Now) return "Atrasados";
+            if (d.Date == today) return "Hoje";
+            if (d.Date == today.AddDays(1)) return "Amanhã";
+            if (d.Date < today.AddDays(7)) return "Próximos 7 dias";
+            return "Mais tarde";
+        }
     }
 
     public void StopRepeating()
@@ -79,6 +166,9 @@ public class Reminder : INotifyPropertyChanged
         OnChanged(nameof(DueBrush));
         OnChanged(nameof(IsRecurring));
         OnChanged(nameof(RepeatText));
+        OnChanged(nameof(HasRemindBefore));
+        OnChanged(nameof(RemindBeforeText));
+        OnChanged(nameof(Group));
     }
 
     // ---------- formatação ----------
@@ -103,7 +193,14 @@ public class Reminder : INotifyPropertyChanged
         var diff = d - DateTime.Now;
         if (diff.TotalSeconds > 0)
         {
+            int days = (d.Date - DateTime.Today).Days;
             if (diff.TotalHours < 24) s += " · em " + Span(diff, true);
+            else if (days >= 2) s += days switch
+            {
+                < 14 => $" · em {days} dias",
+                < 60 => $" · em {days / 7} semana{(days / 7 > 1 ? "s" : "")}" + (days % 7 > 0 ? $" e {days % 7} dia{(days % 7 > 1 ? "s" : "")}" : ""),
+                _ => $" · em {days} dias"
+            };
         }
         else
         {

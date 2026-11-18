@@ -11,7 +11,7 @@
     <RootNamespace>Lembretes</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Product>Lembretes</Product>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

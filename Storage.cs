@@ -16,6 +16,10 @@ public class AppSettings
     public double Opacity { get; set; } = 1.0;
     public bool Compact { get; set; }
     public bool HideHintShown { get; set; }
+    /// <summary>Nome de cada tag (chave = Orange/Green/Yellow/Gray).</summary>
+    public Dictionary<string, string> TagNames { get; set; } = new();
+    /// <summary>Filtro de tag ativo na lista (null = todas).</summary>
+    public TagColor? TagFilter { get; set; }
 }
 
 /// <summary>Dados ficam em %APPDATA%\Lembretes.</summary>
@@ -29,7 +33,11 @@ public static class Storage
     private static readonly string ItemsFile = Path.Combine(Dir, "lembretes.json");
     private static readonly string SettingsFile = Path.Combine(Dir, "config.json");
     private static readonly string LogFile = Path.Combine(Dir, "erros.log");
-    private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions Opts = new()
+    {
+        WriteIndented = true,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+    };
 
     public static List<Reminder> LoadReminders() => Load<List<Reminder>>(ItemsFile) ?? new List<Reminder>();
     public static AppSettings LoadSettings() => Load<AppSettings>(SettingsFile) ?? new AppSettings();
